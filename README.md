@@ -1,7 +1,5 @@
 ## Latentsync 1.5
 
----
-
 ### 1. Build the image
 
 ```
