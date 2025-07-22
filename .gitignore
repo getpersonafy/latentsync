@@ -25,6 +25,7 @@ wandb/
 /venv/
 /detect_results/
 /temp
+/outputs
 
 # checkpoint files
 *.safetensors
@@ -50,3 +51,5 @@ wandb/
 !/docs/*
 !/internal/*.png
 .cog/
+.env
+.env.local
