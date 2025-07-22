@@ -12,7 +12,7 @@ docker buildx build --load --platform linux/amd64 -t latentsync-dev .
 docker tag latentsync-dev:<date> <repository>/latentsync-dev:<date>
 ```
 
-<b>Note</b>: In the meantine, if multiple deployments on the same date, the format will be: `latentsync-dev:<date>-<num>`.
+<b>Note</b>: If multiple deployments on the same date, the format will be: `latentsync-dev:<date>-<num>`.
 <br>
 <b>Suggested format</b>: 7.23.2025 and 7.23.2025-2 (if built and deployed on the same date)
 
