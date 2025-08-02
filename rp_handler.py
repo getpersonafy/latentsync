@@ -6,6 +6,10 @@ import requests
 import os
 import boto3
 from dotenv import load_dotenv
+import runpod
+from runpod.serverless.modules.rp_logger import RunPodLogger
+
+logger = RunPodLogger()
 
 # Reuse your existing CONFIG_PATH and CHECKPOINT_PATH
 CONFIG_PATH = Path("configs/unet/stage2_efficient.yaml")
@@ -67,93 +71,111 @@ def upload_to_s3(local_file_path: str, s3_key: str) -> str:
         raise e
 
 
-def handler(event):
+def concurrent_handler(job):
     """
-    RunPod handler function.
+    RunPod concurrent_handler that processes multiple jobs in a single request.
 
-    Expects:
+    Expects job like:
     {
-        "video_path": "input/video.mp4",
-        "audio_path": "input/audio.wav",
-        "guidance_scale": 1.5,
-        "inference_steps": 20,
-        "seed": 1247
+        "input": {
+            "jobs": [
+                {
+                    "video_path": "...",
+                    "audio_path": "...",
+                    "campaign_id": "...",
+                    "lead_id": "...",
+                    "guidance_scale": 1.5,
+                    "inference_steps": 20,
+                    "seed": 1234
+                },
+                ...
+            ]
+        }
     }
     """
     try:
-        input_data = event.get("input", event)
+        input_data = job.get("input", job)
+        jobs = input_data.get("jobs", [])
 
-        # Essentials
-        video_url = input_data["video_path"]
-        audio_url = input_data["audio_path"]
-        campaign_id = input_data["campaign_id"]
-        lead_id = input_data["lead_id"]
+        if not jobs:
+            return {"status": "failed", "error": "No jobs provided."}
 
-        # Strength of conditioning guidance
-        # Higher = stricter adherence to prompt
-        guidance_scale = input_data.get("guidance_scale", 1.5)
+        results = []
 
-        # Number of denoising steps (quality vs. speed)
-        # Higher = better quality, slower
-        inference_steps = input_data.get("inference_steps", 20)
+        for j in jobs:
+            try:
+                video_url = j["video_path"]
+                audio_url = j["audio_path"]
+                campaign_id = j["campaign_id"]
+                lead_id = j["lead_id"]
 
-        # Controls randomness for reproducibility
-        # Same seed = same output; varies output
-        seed = input_data.get("seed", 1247)
+                guidance_scale = j.get("guidance_scale", 1.5)
+                inference_steps = j.get("inference_steps", 20)
+                seed = j.get("seed", 1247)
 
-        # Prepare output directory
-        output_dir = Path("./outputs/temp")
-        output_dir.mkdir(parents=True, exist_ok=True)
+                output_dir = Path(f"./outputs/temp_{campaign_id}_{lead_id}")
+                output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Download files to local paths
-        video_path = f"{output_dir}/video.mp4"
-        audio_path = f"{output_dir}/audio.wav"
+                video_path = output_dir / "video.mp4"
+                audio_path = output_dir / "audio.wav"
+                output_path = output_dir / f"{campaign_id}_{lead_id}.mp4"
 
-        print("Downloading video...")
-        download_file(video_url, video_path)
-        print("Downloading audio...")
-        download_file(audio_url, audio_path)
+                print(f"[{campaign_id}-{lead_id}] Downloading video...")
+                download_file(video_url, str(video_path))
+                print(f"[{campaign_id}-{lead_id}] Downloading audio...")
+                download_file(audio_url, str(audio_path))
 
-        output_path = f"{campaign_id}_{lead_id}.mp4"
+                config = OmegaConf.load(CONFIG_PATH)
+                config["run"].update(
+                    {
+                        "guidance_scale": guidance_scale,
+                        "inference_steps": inference_steps,
+                    }
+                )
 
-        # Load config
-        config = OmegaConf.load(CONFIG_PATH)
-        config["run"].update(
-            {
-                "guidance_scale": guidance_scale,
-                "inference_steps": inference_steps,
-            }
-        )
+                args = create_args(
+                    str(video_path),
+                    str(audio_path),
+                    str(output_path),
+                    inference_steps,
+                    guidance_scale,
+                    seed,
+                )
 
-        # Create args
-        args = create_args(
-            video_path,
-            audio_path,
-            output_path,
-            inference_steps,
-            guidance_scale,
-            seed,
-        )
+                print(f"[{campaign_id}-{lead_id}] Running inference...")
+                main(config=config, args=args)
 
-        # Run inference
-        main(config=config, args=args)
+                s3_key = f"{campaign_id}/{lead_id}.mp4"
+                s3_url = upload_to_s3(str(output_path), s3_key)
 
-        # Upload output to S3
-        s3_key = output_path # Uploads `${campaignId}/${leadId}.mp4`
-        s3_url = upload_to_s3(output_path, s3_key)
+                results.append(
+                    {
+                        "status": "success",
+                        "lead_id": lead_id,
+                        "campaign_id": campaign_id,
+                        "output_url": s3_url,
+                    }
+                )
 
-        # Return the public URL for frontend consumption
-        return {"status": "success", "output_url": s3_url}
+            except Exception as e:
+                traceback.print_exc()
+                results.append(
+                    {
+                        "status": "failed",
+                        "lead_id": j.get("lead_id"),
+                        "campaign_id": j.get("campaign_id"),
+                        "error": str(e),
+                    }
+                )
+
+        return {"results": results}
 
     except Exception as e:
-        # Print full traceback to logs for debugging
         traceback.print_exc()
-
-        # Return a clear error to RunPod dashboard
         return {
             "status": "failed",
             "error": str(e),
-            "hint": "Check if audio/video URLs are correct, model checkpoints exist, and that all dependencies are installed."
+            "hint": "Check input format or unexpected top-level error.",
         }
 
 
@@ -194,16 +216,13 @@ def create_args(
     )
 
 
-import runpod
-from runpod.serverless.modules.rp_logger import RunPodLogger
-logger = RunPodLogger()
-
 if __name__ == "__main__":
     import traceback
+
     try:
-        logger.info('Starting RunPod Serverless...')
-        runpod.serverless.start({"handler": handler})
+        logger.info("Starting RunPod Serverless...")
+        runpod.serverless.start({"handler": concurrent_handler, "concurrency": 2})
     except Exception as e:
         traceback.print_exc()
-        logger.error(f'Ran into an error: {e}')
+        logger.error(f"Ran into an error: {e}")
         raise e
