@@ -24,14 +24,16 @@ from latentsync.whisper.audio2feature import Audio2Feature
 from DeepCache import DeepCacheSDHelper
 
 
-def main(config, args):
+def main(config, args, unet=None):
     if not os.path.exists(args.video_path):
         raise RuntimeError(f"Video path '{args.video_path}' not found")
     if not os.path.exists(args.audio_path):
         raise RuntimeError(f"Audio path '{args.audio_path}' not found")
 
     # Check if the GPU supports float16
-    is_fp16_supported = torch.cuda.is_available() and torch.cuda.get_device_capability()[0] > 7
+    is_fp16_supported = (
+        torch.cuda.is_available() and torch.cuda.get_device_capability()[0] > 7
+    )
     dtype = torch.float16 if is_fp16_supported else torch.float32
 
     print(f"Input video path: {args.video_path}")
@@ -58,13 +60,18 @@ def main(config, args):
     vae.config.scaling_factor = 0.18215
     vae.config.shift_factor = 0
 
-    unet, _ = UNet3DConditionModel.from_pretrained(
-        OmegaConf.to_container(config.model),
-        args.inference_ckpt_path,
-        device="cpu",
-    )
+    if unet is None:
+        from latentsync.models.unet import (
+            UNet3DConditionModel,
+        )  # Need to import here to avoid issues
 
-    unet = unet.to(dtype=dtype)
+        unet, _ = UNet3DConditionModel.from_pretrained(
+            OmegaConf.to_container(config.model),
+            args.inference_ckpt_path,
+            device="cpu",
+        )
+
+    unet = unet.to(dtype=dtype).to("cuda")
 
     pipeline = LipsyncPipeline(
         vae=vae,
